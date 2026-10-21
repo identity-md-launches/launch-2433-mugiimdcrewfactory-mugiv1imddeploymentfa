@@ -25,6 +25,13 @@ Solidity 0.8.26, Cancun, optimizer 200, via IR, bytecode hash none.
 Final validation: **144 V1 tests and one separate actual-V2 integration test passed**.
 See [the exact evidence and reproduction commands](docs/validation/compatible/VALIDATION.md).
 
+Packaging review of 2026-10-22 (Foundry 1.8.4, no RPC): `forge build` passes and
+`forge test` passes 142 tests with the two fork suites skipped; no Solidity source
+changed. The imported audit findings, their reproduction and the resulting test and
+documentation changes are listed in ADAPTATION.md under "Packaging review of
+2026-10-22". The `check-compatible-artifacts.py` script needs a Python 3
+interpreter, which this review machine did not have; its checks were not re-run here.
+
 Source admission remains pending. Prior paid job
 `6a953f2f-d28d-46cc-91a4-f348efed5c10` reviewed rejected source
 `028d37769edce6e38324182b8909392a9852af16`, not this redesign. Historical reports

@@ -71,6 +71,57 @@ See `docs/IMD_CONSTRUCTOR_DEPLOYMENT.md` for creation order and deterministic
 bindings, and `docs/validation/compatible/VALIDATION.md` for current test evidence.
 Earlier audit/validation documents describe their historical source pins only.
 
+## Packaging review of 2026-10-22 (contracts-only manifest)
+
+This pass packaged the exact reviewed source for the four-factory `evm_contracts`
+launch and reproduced the imported audit of commit `9901dc7`. Outcome: **no
+Solidity source changed**. Every file under `src/` is byte-identical to the
+reviewed candidate, so the raw hook creation-code pin, compiler settings
+(0.8.26, Cancun, optimizer 200, via IR, bytecode hash none), authorities and
+the disclosed 4-factory/19-descendant graph are unchanged. The manifest in
+`launch.json` is the one the request carries: four owner-bound factories in
+order, each with the single static owner `0x20714d50f4675c366de30b603728a90ddddb240f`.
+No explorer source verification is requested or performed.
+
+### Audit findings reproduced against this tree
+
+| Finding | Reproduced? | Action in this pass |
+| --- | --- | --- |
+| Medium: zero V2 pin lets the owner route finale ETH and survivor inventory to any code-bearing receiver, including one forwarding to the owner | Yes. `migrateToV2` checks only `Finalized`, not-yet-migrated and `target.code.length != 0` when the constructor pin is zero. | Preserved: the request specifies "a zero constructor target allows the owner to choose a future receiver; a nonzero pin is enforced". Recorded here as an owner trust assumption and proven by `testOrdinaryFinaleResidualStaysOwnerGatedAndZeroPinAcceptsAnyReceiver` in `test/imd/lifecycle/MugiCompatibilityHandoff.t.sol`. A reviewed nonzero pin in the hook tuple removes this discretion at hook creation. |
+| Medium: `finalize()` records no reward round for surviving-crew holders; the removed survivor LP principal, its treasure, own-buyback budget and unallocated dust have only the owner-only `migrateToV2` exit, with no deadline or permissionless fallback | Yes. After the 30-day sweep only `ledger.reservedEth()` reaches the community treasury; the residual stays until the owner migrates. | Preserved: the request defines the finale as "retains player token backing and reserved player/team ETH, then permits an owner-only one-shot atomic handoff of only available inventory/ETH". The final round's LP ETH is therefore V2 continuity funding, not a holder distribution, and the same test proves it. If the owner key is lost that residual is unrecoverable. Adding a time-bounded permissionless fallback is a source change outside this packaging pass and would alter the pinned hook code; it is listed as an open design decision for the requester before the five child transactions. |
+| Medium: planned hook constants set `teamTreasury == communityTreasury == owner` | Yes, in `hook-constructor.json` only; Solidity accepts equal addresses. | Disclosed, not changed. The launch rules send any treasury share the brief does not name to the owner, and the brief names no community wallet, so a different address would be a stand-in. With these constants expired player claims, emergency unallocated shares and team fees all land in the owner wallet; the hook comment "neither can be redirected to owner" describes the immutable binding, not a distinct beneficiary. Recorded in `hook-constructor.json` `disclosures`. The requester may supply a distinct community address before the hook tuple is encoded. |
+| Low: excluding the PoolManager singleton strips cutoff eligibility from holders who LP a crew token in any third-party Uniswap v4 pool | Yes by construction. `MugiIMDLedger` subtracts `balanceBefore(manager)`; v4 keeps every pool's tokens in that one singleton. | Preserved and disclosed: the official pools hold about 95% of each initial allocation inside the same singleton, so counting the manager would hand most rewards to the protocol's own LP. Only wallet (and non-v4 contract) balances earn; tokens in any v4 pool, official or not, do not. |
+| Low: the four-factory gas-headroom test metered 26,942 gas because forge does not charge creation costs for `new` issued by the test contract | Yes. A scratch probe showed 3,515 gas for `new MugiV1IMDDeploymentFactory` inside the test and 12,261,935 gas for the same four creations through a separate contract. | Fixed in `test/imd/MugiV1IMDDeploymentFactory.t.sol`: the batch now runs by CREATE2 inside `FactoryBatchProbe`, asserts the metered gas is at least the EIP-170/EIP-3860/CREATE2 floor, and estimates the launch transaction (execution + all-nonzero calldata + 21k + 1M factory bookkeeping) at about 14.67M gas, below 16,777,216. `docs/IMD_CONSTRUCTOR_DEPLOYMENT.md` no longer calls the old number a conservative bound. The deployer's simulation of the real ProjectFactory call remains authoritative. |
+| Info: every swap in all ten official pools reverts from each round cutoff until settlement completes, while wallet transfers continue | Yes. `beforeSwap` calls `_requireLive`. | Disclosed below under "Official-pool gates". No change. |
+| Info: scope and checks performed | Not a defect. | Local re-run recorded in README. The protected opcode scan was rehearsed in a scratch test over the four CREATE2-deployed factory runtimes: no reachable DELEGATECALL, CALLCODE or SELFDESTRUCT. |
+
+### Official-pool gates are not ERC20 freezes
+
+The ten crew tokens never consult the hook: `transfer`, `transferFrom` and
+`burn` work in every phase, including at a cutoff, after elimination and after
+the finale, and third-party pools keep working. Separately, the hook's own ten
+Uniswap v4 pools enforce the published game timing: from `nextCutoff` until the
+final `settleRound` batch, and in every phase other than `Live`, a swap through
+an official pool reverts with `InvalidState`; dead crews' pools also hold no
+liquidity after `_beginSettlement`. The halt length depends on when
+`requestElimination` and `settleRound` are called and on VRF latency (up to the
+seven-day timeout before permissionless recovery). Token reward materialization
+and buyback approval share the same `Live`-before-cutoff gate; ETH claims only
+require a phase after `Setup` and before claim expiry. These are venue rules on
+protocol-owned liquidity, not holder restrictions.
+
+### Changes in this pass
+
+| File | Change | Reason |
+| --- | --- | --- |
+| `test/imd/MugiV1IMDDeploymentFactory.t.sol` | `FactoryBatchProbe` and a rewritten `testFactoryCreationBatchHasConservativeGasHeadroom` | Reproduced low finding: metered creation cost must include code deposit. |
+| `test/imd/lifecycle/MugiCompatibilityHandoff.t.sol` | `ForwardingSink` and `testOrdinaryFinaleResidualStaysOwnerGatedAndZeroPinAcceptsAnyReceiver` | Makes the two preserved medium findings verifiable rather than asserted. |
+| `hook-constructor.json` | `disclosures` entries | Treasury/owner coincidence and zero V2 pin consequences for the live tuple. |
+| `docs/IMD_CONSTRUCTOR_DEPLOYMENT.md` | Gas sentence | The old assertion did not measure creation cost. |
+| `README.md`, this file, `inventory.json` | Review record and refreshed file hashes | Packaging. |
+
+No file under `src/`, `foundry.toml`, `remappings`, `lib/` or `launch.json` changed.
+
 ## Official rules checked
 
 - [Contract adaptation](https://api.imd.fun/reads/skill/adapt-contract-project)

@@ -11,6 +11,23 @@ import {MugiV1IMDDeploymentFactory} from "../../src/imd/MugiV1IMDDeploymentFacto
 import {MugiVRFAdapter} from "../../src/game/MugiVRFAdapter.sol";
 import {MugiIMDLedger} from "../../src/imd/modules/MugiIMDLedger.sol";
 
+/// @dev Mirrors the launch factory's CREATE2 batch in a separate contract. Forge does
+/// not meter CREATE issued by the test contract itself (a `new` there reports a few
+/// thousand gas), so the four creations run here where creation costs are charged.
+contract FactoryBatchProbe {
+    function deploy(bytes[4] memory codes) external returns (uint256 gasUsed, address[4] memory created) {
+        uint256 start = gasleft();
+        for (uint256 i; i < 4; ++i) {
+            bytes memory code = codes[i];
+            address deployed;
+            assembly ("memory-safe") { deployed := create2(0, add(code, 32), mload(code), i) }
+            require(deployed != address(0), "factory creation failed");
+            created[i] = deployed;
+        }
+        gasUsed = start - gasleft();
+    }
+}
+
 contract MugiV1IMDDeploymentFactoryTest is MugiIMDDeploymentFixture {
     function setUp() public {
         vm.warp(1 days);
@@ -40,15 +57,43 @@ contract MugiV1IMDDeploymentFactoryTest is MugiIMDDeploymentFixture {
         assertLe(type(MugiIMDEngineFactory).creationCode.length + 32, 49_152);
     }
 
+    /// @notice Estimates the single launch transaction that creates the four manifest
+    /// factories by CREATE2. The measurement must include EIP-170 code deposit,
+    /// CREATE2 base cost and EIP-3860 initcode words; the earlier in-test `new`
+    /// measurement (about 27k gas) omitted all of them. The launch service still
+    /// simulates the exact ProjectFactory call against its own gas ceiling.
     function testFactoryCreationBatchHasConservativeGasHeadroom() public {
-        uint256 start = gasleft();
-        _newFactories();
-        uint256 execution = start - gasleft();
-        uint256 calldataUpperBound = 16 * (type(MugiIMDCrewFactory).creationCode.length
-            + type(MugiIMDAccountingFactory).creationCode.length + type(MugiIMDEngineFactory).creationCode.length
-            + type(MugiV1IMDDeploymentFactory).creationCode.length + 4 * 32);
-        emit log_named_uint("Four factory creation execution gas", execution);
-        assertLt(execution + calldataUpperBound + 100_000, 16_777_216);
+        bytes[4] memory codes = [
+            abi.encodePacked(type(MugiIMDCrewFactory).creationCode, abi.encode(OWNER)),
+            abi.encodePacked(type(MugiV1IMDDeploymentFactory).creationCode, abi.encode(OWNER)),
+            abi.encodePacked(type(MugiIMDAccountingFactory).creationCode, abi.encode(OWNER)),
+            abi.encodePacked(type(MugiIMDEngineFactory).creationCode, abi.encode(OWNER))
+        ];
+        uint256 initcodeBytes;
+        for (uint256 i; i < 4; ++i) {
+            initcodeBytes += codes[i].length;
+        }
+        FactoryBatchProbe probe = new FactoryBatchProbe();
+        (uint256 execution, address[4] memory created) = probe.deploy(codes);
+        uint256 runtimeBytes;
+        for (uint256 i; i < 4; ++i) {
+            assertGt(created[i].code.length, 0);
+            runtimeBytes += created[i].code.length;
+        }
+        // Floor the EVM charges regardless of execution: 200 gas per deposited runtime
+        // byte, 32,000 per CREATE2, and 2 + 6 gas per initcode word (EIP-3860 plus hashing).
+        uint256 creationFloor = 200 * runtimeBytes + 4 * 32_000 + 8 * ((initcodeBytes + 31) / 32);
+        assertGe(execution, creationFloor, "measurement must include creation costs");
+        // Every calldata byte priced as nonzero: four initcodes, four owner words, selector and ABI heads.
+        uint256 calldataUpperBound = 16 * (initcodeBytes + 4 * 32 + 4 + 16 * 32);
+        // The real ProjectFactory adds registry writes and events whose exact cost is
+        // not reproducible here; reserve a full million gas for that bookkeeping.
+        uint256 estimate = 21_000 + execution + calldataUpperBound + 1_000_000;
+        emit log_named_uint("Four factory runtime bytes", runtimeBytes);
+        emit log_named_uint("Four factory initcode bytes", initcodeBytes);
+        emit log_named_uint("Four factory CREATE2 execution gas", execution);
+        emit log_named_uint("Estimated launch transaction gas", estimate);
+        assertLt(estimate, 16_777_216);
     }
 
     function testEveryDescendantCreationCallFitsSeparateTransactionGasCap() public {

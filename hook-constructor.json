@@ -34,5 +34,10 @@
     "airdrop",
     "crewFactory"
   ],
+  "disclosures": [
+    "teamTreasury, communityTreasury and owner are the same wallet in these constants because the brief names no separate community or team address and the launch rules send unnamed treasury shares to the owner. With this tuple, expired player claims (sweepExpiredFinalClaims), emergency unallocated shares and team fees all reach the owner wallet; the hook comment that expired ETH cannot be redirected to owner describes the immutable binding, not a distinct beneficiary. Supply a distinct community address before encoding the hook and ledger tuples if that is not intended.",
+    "v2MigrationTarget is zero: after the ordinary finale the owner may call migrateToV2 once with any address that has code, including a contract that forwards the ETH to the owner. Only player-reserved ETH, team ETH and token escrow are protected. A reviewed nonzero pin removes that discretion. Without any migration the finale residual stays in the hook indefinitely; there is no permissionless fallback.",
+    "Reviewed on 2026-10-22 against commit 9901dc7 with no Solidity change; see ADAPTATION.md 'Packaging review of 2026-10-22'."
+  ],
   "instructions": "This file supplies only season constants. It is not a complete constructor tuple or executable deployment payload. Derive all unresolved addresses from the final four factory addresses and their documented CREATE nonces; encode the complete flat 14-field Configuration, hash the exact compiled creation code plus that tuple, then mine the hook CREATE2 salt. Review all service and authority settings separately. Follow docs/IMD_CONSTRUCTOR_DEPLOYMENT.md. Do not use the previous six-argument constructor or its old full initcode hash."
 }

@@ -12,7 +12,11 @@ contract HandoffReceiver {
     uint256 public receivedTokens;
     address public receivedToken;
     uint8 public receivedCrew;
-    function setReject(bool value) external { reject = value; }
+
+    function setReject(bool value) external {
+        reject = value;
+    }
+
     function receiveV1Finale(uint8 survivor, address token, uint256 amount) external payable {
         require(!reject, "receiver rejected");
         require(MugiCrewToken(token).balanceOf(address(this)) >= amount, "inventory missing");
@@ -23,6 +27,16 @@ contract HandoffReceiver {
     }
 }
 
+/// @dev A code-bearing receiver that forwards finale ETH to whoever deployed it.
+contract ForwardingSink {
+    address private immutable beneficiary = msg.sender;
+
+    function receiveV1Finale(uint8, address, uint256) external payable {
+        (bool ok,) = beneficiary.call{value: msg.value}("");
+        require(ok, "forward failed");
+    }
+}
+
 contract MugiCompatibilityHandoffTest is MugiGameTestBase {
     function setUp() public {
         vm.warp(1_800_000_000);
@@ -30,7 +44,9 @@ contract MugiCompatibilityHandoffTest is MugiGameTestBase {
     }
 
     // The production constructor may leave V2 unselected until its code exists.
-    function _migrationTarget() internal pure override returns (address) { return address(0); }
+    function _migrationTarget() internal pure override returns (address) {
+        return address(0);
+    }
 
     function testCutoffAndKnownLoserTransfersDoNotMoveOrDuplicateConversion() public {
         _fundTreasure(0);
@@ -60,7 +76,9 @@ contract MugiCompatibilityHandoffTest is MugiGameTestBase {
         vm.prank(ALICE);
         game.claimTokens();
         (uint256[10] memory claimed,,) = game.previewAccount(ALICE);
-        for (uint8 i; i < 10; ++i) assertEq(claimed[i], 0);
+        for (uint8 i; i < 10; ++i) {
+            assertEq(claimed[i], 0);
+        }
         _assertSolvent();
     }
 
@@ -113,6 +131,58 @@ contract MugiCompatibilityHandoffTest is MugiGameTestBase {
         vm.expectRevert(MugiIMDGameHook.InvalidState.selector);
         game.migrateToV2(address(receiver));
         _assertSolvent();
+    }
+
+    /// @notice Disclosure test for the preserved finale design, not a fix: after the
+    /// ordinary finale the survivor pool's removed LP principal, its treasure and
+    /// unallocated dust stay in the hook. No permissionless path moves them, the
+    /// 30-day sweep sends only expired player ETH to community, and with a zero
+    /// constructor pin the owner may hand the residual to any code-bearing receiver,
+    /// including one that forwards it straight back to the owner.
+    function testOrdinaryFinaleResidualStaysOwnerGatedAndZeroPinAcceptsAnyReceiver() public {
+        for (uint8 i; i < 9; ++i) {
+            _fundTreasure(i);
+            _round(0);
+        }
+        vm.warp(game.nextCutoff());
+        (, uint256 aliceEthBeforeFinale,) = game.previewAccount(ALICE);
+        game.finalize();
+        (, uint256 aliceEthAfterFinale,) = game.previewAccount(ALICE);
+        assertEq(aliceEthAfterFinale, aliceEthBeforeFinale, "finalize records no reward round for survivors");
+        uint256 reserved = game.reservedPlayerEth();
+        uint256 team = game.teamEth();
+        uint256 residual = address(game).balance - reserved - team;
+        assertGt(residual, 0, "removed survivor LP principal and treasure remain in the hook");
+
+        vm.warp(game.claimsExpireAt());
+        uint256 communityBefore = COMMUNITY.balance;
+        game.sweepExpiredFinalClaims();
+        assertEq(COMMUNITY.balance, communityBefore + reserved, "only expired player ETH reaches community");
+        assertEq(address(game).balance, residual + team, "residual survives the 30-day window");
+
+        vm.startPrank(BOB);
+        vm.expectRevert(MugiIMDGameHook.InvalidState.selector);
+        game.claimEth(payable(BOB));
+        vm.expectRevert(MugiIMDGameHook.InvalidState.selector);
+        game.sweepExpiredFinalClaims();
+        game.withdrawTeamFees();
+        vm.stopPrank();
+        assertEq(address(game).balance, residual, "team withdrawal moves only team ETH");
+
+        ForwardingSink sink = new ForwardingSink();
+        vm.prank(BOB);
+        vm.expectRevert(MugiIMDGameHook.Unauthorized.selector);
+        game.migrateToV2(address(sink));
+        assertEq(address(game).balance, residual, "no non-owner path can move the residual");
+
+        assertEq(game.v2MigrationTarget(), address(0));
+        vm.expectRevert(MugiIMDGameHook.InvalidState.selector);
+        game.migrateToV2(address(0xBAD)); // no code
+        uint256 ownerBefore = address(this).balance;
+        game.migrateToV2(address(sink));
+        assertEq(address(this).balance, ownerBefore + residual, "zero pin lets the owner route the residual to itself");
+        assertEq(address(game).balance, 0);
+        assertTrue(game.migrated());
     }
 
     function testRejectingV2ReceiverRollsBackAllTransfersAndAllowsRetry() public {
