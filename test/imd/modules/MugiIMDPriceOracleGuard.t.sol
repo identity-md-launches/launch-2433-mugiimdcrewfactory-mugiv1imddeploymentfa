@@ -76,18 +76,31 @@ contract MugiIMDPriceOracleGuardTest is Test {
         prices.settlementPriceValid(crew, cutoff, tick);
     }
 
-    /// @dev With the cutoff at `now`, the guard is exactly consult() plus the 488-tick band.
+    /// @dev With the cutoff at `now` and under a day of history, the guard is the exact
+    /// floored time-weighted mean since the first update plus the 488-tick band; it is
+    /// the whole-round mean, not consult()'s shorter observation window.
     /// forge-config: default.fuzz.runs = 512
-    function testFuzzGuardAtNowMatchesConsultBand(int24[8] memory ticks, uint32[8] memory gaps, int24 spot) public {
-        (int24 lo, int24 hi, uint64 time) = _history(ticks, gaps);
+    function testFuzzGuardAtNowMatchesRoundMeanBand(int24[8] memory ticks, uint32[8] memory gaps, int24 spot) public {
+        uint64 time = START;
+        int256 weighted;
+        for (uint256 i; i < 8; ++i) {
+            int24 tick = int24(bound(ticks[i], -100_000, 100_000));
+            prices.update(0, tick);
+            uint64 gap = uint64(bound(gaps[i], 1, 2 hours));
+            weighted += int256(tick) * int256(uint256(gap));
+            time += gap;
+            vm.warp(time);
+        }
         spot = int24(bound(spot, -110_000, 110_000));
-        (int24 average,) = prices.consult(0);
-        // A time-weighted mean (floored) of observed ticks stays inside their range.
-        assertGe(average, lo);
-        assertLe(average, hi);
-        int256 deviation = int256(spot) - int256(average);
-        bool inBand = deviation <= 488 && deviation >= -488;
-        assertEq(prices.settlementPriceValid(0, time, spot), inBand);
+        uint64 elapsed = time - START;
+        bool expected;
+        if (elapsed >= 15 minutes) {
+            int256 mean = weighted / int256(uint256(elapsed));
+            if (weighted < 0 && weighted % int256(uint256(elapsed)) != 0) mean--;
+            int256 deviation = int256(spot) - mean;
+            expected = deviation <= 488 && deviation >= -488;
+        }
+        assertEq(prices.settlementPriceValid(0, time, spot), expected);
     }
 
     /// @dev Any update after the cutoff makes the guard refuse that cutoff.
