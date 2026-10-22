@@ -193,6 +193,69 @@ wall-clock daily grid. The source is unchanged on this point (advisory
 | Info `833c9d77…`: `MugiIMDV4Engine.registerPool` is unreachable `onlyHook` code | Accurate. The hook never calls it. Removing it would change the engine child and the engine factory with no behaviour gain, so it is left as is. |
 | Info `45796c4d…`: `MugiIMDVerifier` uses single-step `Ownable` | Accurate. A bad transfer only disables pinned buyback plans, and budgets fall back to equal shares. This is an operational note for the verifier-owner plan. |
 
+## Second revision of 2026-10-22: settlement reference window
+
+**Source changed in one file; review it before deployment.** Medium finding
+`cbd2b1fb…` (a follow-up to `e1d28ad3…`) reproduced exactly as reported. Nothing
+has been deployed. `MugiIMDGameHook.sol` and every other file under `src/` are
+unchanged. The raw hook creation code is byte-identical: keccak
+`0x1cd53e485f1619d07454ecbfb17c53e45b8549b5bb500f4a4c66567cc38c626c`, 24,923 B. The
+main, crew and engine factory bytecodes are identical too. Only the oracle child and
+the `MugiIMDAccountingFactory` that creates it change: the factory runtime is
+20,323 B and its initcode 20,476 B (was 19,523 B); the oracle initcode is 5,257 B.
+Compiler settings, the four manifest constructors, authorities, `launch.json` and the
+4-factory/19-descendant graph are unchanged.
+
+### Reproduction
+
+With the reviewer's proof (`Proof_cbd2b1fb7f6d.t.sol`, unmodified) on the starting
+tree: crews 0..7 are eliminated, a 300 ETH pump of crew 9 is made at
+`nextCutoff - 16 minutes`, and crew 8 is eliminated. The proof failed with
+`matched liquidity deposited at pumped price: 27991789041817648579719 != 22898085733661968682982`.
+The cause: `_meanBefore(series, cutoff)` starts at the newest observation at least
+15 minutes before the cutoff. The pump's own observation is that start, so the "TWAP"
+equals the pumped spot. After the fix, the proof passes: the crew-9 share emits
+`LiquidityDeferred`, liquidity stays at 22,898,085,733,661,968,682,982 and the round
+trip loses.
+
+### Change
+
+| File | Change | Finding / rule |
+| --- | --- | --- |
+| `src/imd/modules/MugiIMDPriceOracle.sol` | `settlementPriceValid` now compares the spot with the mean tick over the **whole round** ending at the cutoff. The new private `_roundMean` measures from the hour boundary at or before `cutoff - SETTLEMENT_WINDOW` (1 day). The hook sets every cutoff one day after the previous round's final settlement or launch, so this is that round's start. If the series' first update is later, the window starts there. `update` now also writes an hourly checkpoint: on the first update after an hour boundary it stores the exact cumulative tick at that boundary and the tick that held across it. The earliest checkpoint in the window is projected back to the boundary with that tick, so the mean is exact and no ticks are interpolated. The window holds at most 26 boundaries and there are 32 slots, so swap spam cannot evict the start. A stale slot (32 hours older) is ignored. With no checkpoint in the window the pool has not moved since before it, and the live tick is used. The guard still never reverts. `consult`, `quoteMinimum` and buyback protection are unchanged: they still use the 15-minute `MIN_HISTORY` window, and the floor division moved into a shared `_floorMean`. | Medium `cbd2b1fb…` |
+| `test/imd/lifecycle/MugiSettlementPricing.t.sol` | `testPumpHeldBeforeFifteenMinuteTailStillDefers`: the reviewer's 300 ETH scenario with the pump held for 16 minutes and for 12 hours. Both defer, liquidity is unchanged and the round trip loses. | Test for the fix |
+| `test/imd/modules/MugiIMDStateModules.t.sol` | `testSettlementGuardAveragesWholeRoundNotFifteenMinuteTail` (16-minute and 12-hour pumps, a tick held for the whole window), `testSettlementGuardRoundMeanIsExact` (hand-computed means with exact ±488 edges for a back-projected checkpoint, a series that starts inside the window, and a quiet series with a stale slot), `testSettlementGuardCheckpointsSurviveObservationSpam` (201 updates refill the 128-entry ring after a pump; the guard still uses the round). | Unit tests |
+| `README.md`, this file, `docs/IMD_CONSTRUCTOR_DEPLOYMENT.md`, `inventory.json` | Revision record, new constants, launch-gas figures for the larger accounting factory, refreshed sha256. The entries for `src/imd/MugiIMDGameHook.sol` and `test/imd/lifecycle/MugiGameHook.t.sol` were refreshed too. Those files are unchanged in this revision, but their recorded hashes predated the previous round's pipeline `forge fmt`. Every listed hash now matches the submitted file. | Packaging |
+
+All five new tests fail on the previous oracle and pass on this one. The existing
+`testSettlementPriceGuardUsesTwapEndingAtCutoff` and the three earlier settlement
+lifecycle tests pass unchanged.
+
+New named constants, chosen here because the brief leaves them open:
+`SETTLEMENT_WINDOW = 1 days` (the hook's fixed round length),
+`CHECKPOINT_INTERVAL = 1 hours`, and 32 checkpoint slots.
+
+### Residual properties, disclosed
+
+- **A pump held across the whole window still passes.** Any time-weighted reference
+  accepts a price that has really held. To pass, the 300 ETH example has to be held
+  for most of the round (a 12-hour hold is deferred), exposed to arbitrage the whole
+  time, on top of the VRF survival risk and the round-trip fee.
+- **More legitimate deferrals.** A crew whose spot ends more than 488 ticks (about 5%)
+  from its round mean now has its matched share deferred, even with no manipulation.
+  An example is a steady 10% rise during the day. The 15-minute tail deferred only
+  late moves. Deferred ETH is not lost. It stays in the hook and joins the finale
+  residual (V2 handoff) or the emergency `recoveryEth`, exactly as before.
+- The window can include up to one hour before the round's start. That hour falls in
+  the frozen period after the previous cutoff, at the previous round's closing price.
+- Launch gas: the larger accounting factory raises the four-factory estimate in
+  `testFactoryCreationBatchHasConservativeGasHeadroom` from about 14.67M to about
+  14.97M gas (12.54M metered execution), still under 16,777,216. The deployer's
+  simulation of the real factory call remains authoritative.
+- Gas: in a pool quiet for the whole round, the guard reads up to 26 empty
+  checkpoint slots, about 67k gas per survivor, measured. `settleRound(maxPools)`
+  stays batchable. `update` writes at most one extra storage slot per pool per hour.
+
 ## Official rules checked
 
 - [Contract adaptation](https://api.imd.fun/reads/skill/adapt-contract-project)

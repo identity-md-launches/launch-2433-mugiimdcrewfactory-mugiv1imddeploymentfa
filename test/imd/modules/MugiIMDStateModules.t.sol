@@ -159,6 +159,86 @@ contract MugiIMDStateModulesTest is Test {
         assertFalse(prices.settlementPriceValid(0, cutoff, 0));
     }
 
+    // Round-long settlement reference. Cutoff C is 20 minutes past an hour, so the window
+    // runs from the hour boundary GS = C - 1 day - 20 minutes to C (87,600 seconds).
+    uint64 internal constant GS = 10 days;
+    uint64 internal constant C = GS + 1 days + 20 minutes;
+
+    /// @dev Reviewer finding cbd2b1fb: a pump 16 minutes before the cutoff equalled the old
+    /// 15-minute mean. Over the round it weighs 960/87600 seconds. Only a tick held across
+    /// the whole window passes (disclosed residual).
+    function testSettlementGuardAveragesWholeRoundNotFifteenMinuteTail() public {
+        vm.warp(GS - 5 hours);
+        prices.update(1, 0);
+        prices.update(2, 0);
+        prices.update(3, 0);
+        vm.warp(GS - 1 hours);
+        prices.update(2, 2000);
+        vm.warp(C - 12 hours);
+        prices.update(3, 2000);
+        vm.warp(C - 16 minutes);
+        prices.update(1, 2000);
+        vm.warp(C + 1 hours);
+        // floor(2000 * 960 / 87600) = 21.
+        assertFalse(prices.settlementPriceValid(1, C, 2000));
+        assertTrue(prices.settlementPriceValid(1, C, 21 + 488));
+        assertFalse(prices.settlementPriceValid(1, C, 21 + 489));
+        // floor(2000 * 43200 / 87600) = 986.
+        assertFalse(prices.settlementPriceValid(3, C, 2000));
+        assertTrue(prices.settlementPriceValid(3, C, 986 + 488));
+        assertFalse(prices.settlementPriceValid(3, C, 986 + 489));
+        assertTrue(prices.settlementPriceValid(2, C, 2000));
+    }
+
+    /// @dev The first update after GS lands in the next hour; its checkpoint is projected back
+    /// to GS with the tick that held across it. A series starting inside the window uses its
+    /// first update; a quiet series ignores a stale checkpoint 32 hours older sharing a slot.
+    function testSettlementGuardRoundMeanIsExact() public {
+        uint64 stale = (GS / 1 hours + 5 - 32) * 1 hours + 100;
+        vm.warp(stale);
+        prices.update(6, -700);
+        vm.warp(GS - 5 hours);
+        prices.update(0, 1000);
+        vm.warp(GS + 90 minutes);
+        prices.update(0, 0);
+        vm.warp(C - 20 hours);
+        prices.update(5, 500);
+        vm.warp(C - 6 hours);
+        prices.update(0, 4000);
+        vm.warp(C + 1 hours);
+        // (1000 * 5400 + 4000 * 21600) / 87600 = 1047.9 -> 1047.
+        assertTrue(prices.settlementPriceValid(0, C, 1047 + 488));
+        assertFalse(prices.settlementPriceValid(0, C, 1047 + 489));
+        assertTrue(prices.settlementPriceValid(0, C, 1047 - 488));
+        assertFalse(prices.settlementPriceValid(0, C, 1047 - 489));
+        assertTrue(prices.settlementPriceValid(5, C, 500 + 488));
+        assertFalse(prices.settlementPriceValid(5, C, 500 + 489));
+        assertTrue(prices.settlementPriceValid(5, C, 500 - 488));
+        assertFalse(prices.settlementPriceValid(5, C, 500 - 489));
+        assertTrue(prices.settlementPriceValid(6, C, -700 - 488));
+        assertFalse(prices.settlementPriceValid(6, C, -700 - 489));
+        assertTrue(prices.settlementPriceValid(6, C, -700 + 488));
+        assertFalse(prices.settlementPriceValid(6, C, -700 + 489));
+    }
+
+    /// @dev Swap spam refills the 128-entry observation ring after a pump, but cannot evict
+    /// the hourly checkpoint at the start of the round.
+    function testSettlementGuardCheckpointsSurviveObservationSpam() public {
+        vm.warp(GS - 5 hours);
+        prices.update(4, 0);
+        uint64 pumpedAt = C - 4 hours;
+        for (uint64 i; i <= 200; ++i) {
+            vm.warp(pumpedAt + i * 61);
+            prices.update(4, 2000);
+        }
+        assertEq(prices.observationCount(4), 128);
+        vm.warp(C + 1 hours);
+        // floor(2000 * 14400 / 87600) = 328.
+        assertFalse(prices.settlementPriceValid(4, C, 2000));
+        assertTrue(prices.settlementPriceValid(4, C, 328 + 488));
+        assertFalse(prices.settlementPriceValid(4, C, 328 + 489));
+    }
+
     function testOracleNegativeMeanRoundsDown() public {
         prices.update(0, -2);
         vm.warp(1 days + 10 minutes);

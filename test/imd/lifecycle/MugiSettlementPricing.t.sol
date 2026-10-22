@@ -76,6 +76,37 @@ contract MugiSettlementPricingTest is MugiGameTestBase {
         _assertSolvent();
     }
 
+    /// @dev Follow-up reviewer reproduction (cbd2b1fb): the same pump 16 minutes before the
+    /// cutoff became the start of the old 15-minute window, so its mean equalled the pumped
+    /// spot and crew-9 liquidity rose to 27991789041817648579719 (+19.06 ETH round trip).
+    /// The round-long reference defers it, and so does a pump held for half the round.
+    function testPumpHeldBeforeFifteenMinuteTailStillDefers() public {
+        for (uint8 round; round < 8; ++round) {
+            _round(0);
+        }
+        uint256 snapshot = vm.snapshotState();
+        uint32[2] memory heldFor = [uint32(16 minutes), uint32(12 hours)];
+        for (uint256 i; i < heldFor.length; ++i) {
+            vm.revertToState(snapshot);
+            vm.warp(game.nextCutoff() - heldFor[i]);
+            uint256 before = MALLORY.balance;
+            _buy(9, 300 ether);
+            _requestAndFulfill(0);
+            assertEq(game.defeatedCrew(), 8);
+            uint128 pumpedLiquidity = game.positionLiquidity(9);
+            assertEq(pumpedLiquidity, 22898085733661968682982);
+
+            vm.expectEmit(true, false, false, false, address(game));
+            emit MugiGameHook.LiquidityDeferred(9, 0);
+            game.settleRound(10);
+
+            assertEq(game.positionLiquidity(9), pumpedLiquidity);
+            _sellAll(9);
+            assertLt(MALLORY.balance, before);
+            _assertSolvent();
+        }
+    }
+
     /// @dev The same pump settled into a crew whose price did not move still reinforces.
     function testUnmovedSurvivorStillReceivesMatchedLiquidity() public {
         for (uint8 round; round < 8; ++round) {

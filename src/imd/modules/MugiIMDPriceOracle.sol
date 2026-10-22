@@ -8,6 +8,7 @@ import {FullMath} from "v4-core/src/libraries/FullMath.sol";
 /// @dev The controller updates before AND after every pool swap, including its own swaps.
 /// The minimum history is 15 minutes. We use the closest observation at or before the
 /// cutoff and its actual age, rather than inventing ticks by interpolating sparse samples.
+/// Settlement deposits are checked against an exact round-long TWAP from hourly checkpoints.
 contract MugiIMDPriceOracle {
     uint32 public constant MIN_HISTORY = 15 minutes;
     uint32 public constant MIN_SAMPLE_INTERVAL = 60;
@@ -18,10 +19,26 @@ contract MugiIMDPriceOracle {
     // 304 ticks are just under a 3% price change. currentTick rounds the actual tick down,
     // so moving 303 complete ticks accounts conservatively for its fractional remainder.
     int24 private constant PRICE_LIMIT_TICKS = 303;
+    /// @notice Settlement reference length: the hook's fixed round, from the previous
+    /// round's final settlement (or launch) to the cutoff.
+    uint32 public constant SETTLEMENT_WINDOW = 1 days;
+    /// @notice Hour-boundary checkpoints keep that reference exact. Swaps cannot evict them:
+    /// a window holds at most 26 boundaries and CHECKPOINT_SLOTS is 32.
+    uint32 public constant CHECKPOINT_INTERVAL = 1 hours;
+    uint8 private constant CHECKPOINT_SLOTS = 32;
 
     struct Observation {
         uint64 timestamp;
         int128 cumulativeTick;
+    }
+
+    /// @dev `tick` held from the previous update through `timestamp`. A `first` checkpoint
+    /// is the series' first update; no price exists before it.
+    struct Checkpoint {
+        uint64 timestamp;
+        int128 cumulativeTick;
+        int24 tick;
+        bool first;
     }
 
     struct Series {
@@ -31,6 +48,7 @@ contract MugiIMDPriceOracle {
         uint16 count;
         int128 cumulativeTick;
         Observation[128] observations;
+        Checkpoint[32] checkpoints;
     }
 
     struct State {
@@ -72,7 +90,14 @@ contract MugiIMDPriceOracle {
             series.lastUpdate = nowTime;
             series.count = 1;
             series.observations[0] = Observation(nowTime, 0);
+            series.checkpoints[_checkpointSlot(nowTime)] = Checkpoint(nowTime, 0, currentTick, true);
             return;
+        }
+        uint64 hourStart = nowTime - nowTime % CHECKPOINT_INTERVAL;
+        if (hourStart > series.lastUpdate) {
+            // The prior tick held from lastUpdate until now, so this boundary is exact.
+            series.checkpoints[_checkpointSlot(hourStart)] =
+                Checkpoint(hourStart, _cumulativeAt(series, hourStart), series.currentTick, false);
         }
         int128 cumulative = _cumulativeAt(series, nowTime);
         series.cumulativeTick = cumulative;
@@ -98,17 +123,55 @@ contract MugiIMDPriceOracle {
 
     /// @notice Settlement reinforcement guard. Official-pool swaps stop at the round cutoff,
     /// so the price a settlement deposit meets is the one the last pre-cutoff trade left.
-    /// It is accepted only within MAX_SPOT_DEVIATION_TICKS of the TWAP ending at that cutoff.
+    /// It is accepted only within MAX_SPOT_DEVIATION_TICKS of the TWAP over the whole round
+    /// ending at that cutoff, so a pump has to be held for most of the round to pass.
     /// @dev Never reverts for missing or post-cutoff history; the hook defers instead.
     function settlementPriceValid(uint8 crew, uint64 cutoff, int24 currentTick) external view returns (bool) {
         if (crew >= 10 || currentTick < TickMath.MIN_TICK || currentTick > TickMath.MAX_TICK) return false;
         Series storage series = self.pools[crew];
-        if (series.count == 0 || cutoff < MIN_HISTORY || cutoff > _timestamp() || series.lastUpdate > cutoff) {
+        if (series.count == 0 || cutoff < SETTLEMENT_WINDOW || cutoff > _timestamp() || series.lastUpdate > cutoff) {
             return false;
         }
-        (bool found, int24 averageTick,) = _meanBefore(series, cutoff);
+        (bool found, int24 averageTick) = _roundMean(series, cutoff);
         int256 deviation = int256(currentTick) - int256(averageTick);
         return found && deviation <= MAX_SPOT_DEVIATION_TICKS && deviation >= -int256(MAX_SPOT_DEVIATION_TICKS);
+    }
+
+    /// @dev Exact mean tick from the hour boundary at or before `end - SETTLEMENT_WINDOW`
+    /// (or the series' first update, if later) to `end`. The first update at or after that
+    /// boundary wrote the earliest checkpoint at or after it, inside one constant-tick span.
+    function _roundMean(Series storage series, uint64 end) private view returns (bool found, int24 averageTick) {
+        uint64 start = end - SETTLEMENT_WINDOW;
+        start -= start % CHECKPOINT_INTERVAL;
+        int128 startCumulative;
+        bool located;
+        for (uint64 hourStart = start; hourStart <= end; hourStart += CHECKPOINT_INTERVAL) {
+            Checkpoint storage checkpoint = series.checkpoints[_checkpointSlot(hourStart)];
+            // Empty or stale (an earlier hour sharing the slot).
+            if (
+                checkpoint.timestamp == 0 || checkpoint.timestamp < hourStart
+                    || checkpoint.timestamp >= hourStart + CHECKPOINT_INTERVAL
+            ) continue;
+            if (checkpoint.first) {
+                start = checkpoint.timestamp;
+                startCumulative = checkpoint.cumulativeTick;
+            } else {
+                startCumulative = int128(
+                    int256(checkpoint.cumulativeTick) - int256(checkpoint.tick)
+                        * int256(uint256(checkpoint.timestamp - start))
+                );
+            }
+            located = true;
+            break;
+        }
+        // No checkpoint means no update since `start`; the live tick has held since before it.
+        if (!located) {
+            if (series.lastUpdate > start) return (false, 0);
+            startCumulative = _cumulativeAt(series, start);
+        }
+        if (end - start < MIN_HISTORY) return (false, 0);
+        int256 elapsedTick = int256(_cumulativeAt(series, end)) - int256(startCumulative);
+        return (true, _floorMean(elapsedTick, end - start));
     }
 
     /// @dev Mean tick from the newest observation at least MIN_HISTORY before `end` up to `end`.
@@ -127,12 +190,15 @@ contract MugiIMDPriceOracle {
             if (age > type(uint32).max) revert InvalidTime();
             secondsUsed = uint32(age);
             int256 elapsedTick = int256(cumulative) - int256(observation.cumulativeTick);
-            int256 mean = elapsedTick / int256(uint256(age));
-            // Solidity truncates negative division toward zero; ticks require mathematical floor.
-            if (elapsedTick < 0 && elapsedTick % int256(uint256(age)) != 0) mean--;
-            averageTick = int24(mean); // A time-weighted mean stays within validated TickMath bounds.
-            return (true, averageTick, secondsUsed);
+            return (true, _floorMean(elapsedTick, age), secondsUsed);
         }
+    }
+
+    function _floorMean(int256 elapsedTick, uint64 age) private pure returns (int24) {
+        int256 mean = elapsedTick / int256(uint256(age));
+        // Solidity truncates negative division toward zero; ticks require mathematical floor.
+        if (elapsedTick < 0 && elapsedTick % int256(uint256(age)) != 0) mean--;
+        return int24(mean); // A time-weighted mean stays within validated TickMath bounds.
     }
 
     /// @notice Identical read ABI to the hook; aggregation avoids redundant CALLs.
@@ -181,6 +247,10 @@ contract MugiIMDPriceOracle {
         // MAX_TICK * uint64.max is well below int128.max.
         return
             series.cumulativeTick + int128(int256(series.currentTick) * int256(uint256(timestamp - series.lastUpdate)));
+    }
+
+    function _checkpointSlot(uint64 timestamp) private pure returns (uint256) {
+        return (timestamp / CHECKPOINT_INTERVAL) % CHECKPOINT_SLOTS;
     }
 
     function _timestamp() private view returns (uint64) {

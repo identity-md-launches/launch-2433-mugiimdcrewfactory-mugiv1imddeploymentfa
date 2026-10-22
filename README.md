@@ -44,6 +44,22 @@ tunable constant was introduced; the guard reuses the oracle's
 cutoff is fixed at launch; each later cutoff is one day after the previous round's
 final settlement batch. See ADAPTATION.md, "Revision of 2026-10-22".
 
+Second revision of 2026-10-22 (reviewer finding `cbd2b1fb…`): **the price oracle
+source changed and must be reviewed before deployment.** A pump held just over 15
+minutes passed the guard above, because its reference started at the pump. The
+settlement guard now uses the exact mean tick over the whole round ending at the
+cutoff, from hourly checkpoints that swaps cannot evict. Buyback protection still
+uses the 15-minute TWAP. The hook source, its creation-code pin
+(`0x1cd53e48…c626c`, 24,923 B) and the main, crew and engine factories are
+byte-identical. Only the oracle and `MugiIMDAccountingFactory` bytecode change.
+New named constants in `MugiIMDPriceOracle`: `SETTLEMENT_WINDOW = 1 days`
+(the round length), `CHECKPOINT_INTERVAL = 1 hours`, and 32 checkpoint slots.
+`forge build` and `forge test` pass: 150 tests, with the two fork suites skipped
+when no RPC is set. With a mainnet RPC the three fork tests also pass. See
+ADAPTATION.md, "Second revision of 2026-10-22", for the residual properties: a pump
+held for the whole round still passes, and a legitimate move of more than about 5%
+from the round mean now defers that crew's matched share.
+
 Source admission remains pending. Prior paid job
 `6a953f2f-d28d-46cc-91a4-f348efed5c10` reviewed rejected source
 `028d37769edce6e38324182b8909392a9852af16`, not this redesign. Historical reports
