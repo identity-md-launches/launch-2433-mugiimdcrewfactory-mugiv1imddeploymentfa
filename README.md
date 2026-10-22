@@ -32,6 +32,18 @@ documentation changes are listed in ADAPTATION.md under "Packaging review of
 2026-10-22". The `check-compatible-artifacts.py` script needs a Python 3
 interpreter, which this review machine did not have; its checks were not re-run here.
 
+Revision of 2026-10-22 (reviewer findings): **Solidity source changed and must be
+reviewed before deployment.** Settlement matched liquidity is now deferred when the
+pool's spot tick is more than 488 ticks from the TWAP ending at the round cutoff,
+and `abortPrelaunch` burns the unused reserve. The raw hook creation-code pin is now
+`0x1cd53e485f1619d07454ecbfb17c53e45b8549b5bb500f4a4c66567cc38c626c` (24,923 B).
+`forge build` and `forge test` pass: 146 tests, with the two fork suites skipped
+when no RPC is set. With a mainnet RPC the three fork tests also pass. No new
+tunable constant was introduced; the guard reuses the oracle's
+`MAX_SPOT_DEVIATION_TICKS = 488` and `MIN_HISTORY = 15 minutes`. Only the first
+cutoff is fixed at launch; each later cutoff is one day after the previous round's
+final settlement batch. See ADAPTATION.md, "Revision of 2026-10-22".
+
 Source admission remains pending. Prior paid job
 `6a953f2f-d28d-46cc-91a4-f348efed5c10` reviewed rejected source
 `028d37769edce6e38324182b8909392a9852af16`, not this redesign. Historical reports

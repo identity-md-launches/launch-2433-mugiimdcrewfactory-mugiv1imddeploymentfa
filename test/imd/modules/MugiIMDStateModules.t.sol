@@ -65,13 +65,16 @@ contract MugiIMDStateModulesTest is Test {
         plan.deadline = uint64(block.timestamp + 1 hours);
         plan.allocations[0] = 50 ether;
         plan.allocations[1] = 50 ether;
-        bytes32 expected = keccak256(abi.encode(
-            block.chainid, address(this), plan.roundId, plan.nonce, plan.deadline, plan.allocations
-        ));
+        bytes32 expected = keccak256(
+            abi.encode(block.chainid, address(this), plan.roundId, plan.nonce, plan.deadline, plan.allocations)
+        );
         assertEq(budgets.hash(plan), expected);
-        assertNotEq(expected, keccak256(abi.encode(
-            block.chainid, address(budgets), plan.roundId, plan.nonce, plan.deadline, plan.allocations
-        )));
+        assertNotEq(
+            expected,
+            keccak256(
+                abi.encode(block.chainid, address(budgets), plan.roundId, plan.nonce, plan.deadline, plan.allocations)
+            )
+        );
         MugiIMDModuleVerifier verifier = new MugiIMDModuleVerifier(address(this), address(budgets), expected);
         budgets.approve(plan, address(verifier), hex"1234");
         MugiIMDBuybacks.Budget memory b = budgets.roundBudget(1);
@@ -130,6 +133,30 @@ contract MugiIMDStateModulesTest is Test {
         vm.warp(block.timestamp + 15 minutes);
         vm.expectRevert(MugiIMDPriceOracle.SpotDeviation.selector);
         prices.quoteMinimum(0, 1 ether, 600);
+    }
+
+    /// @dev Settlement guard: TWAP ends at the cutoff, never reverts, and rejects
+    /// missing history, future cutoffs and series already updated after the cutoff.
+    function testSettlementPriceGuardUsesTwapEndingAtCutoff() public {
+        // Absolute times: via-IR may reuse an earlier block.timestamp read after a warp.
+        uint64 cutoff = 1 days + 30 minutes;
+        assertFalse(prices.settlementPriceValid(0, 1 days, 0));
+        prices.update(0, 0);
+        // A last-second move to tick 2000 adds one second of weight before the cutoff.
+        vm.warp(cutoff - 1);
+        prices.update(0, 2000);
+        vm.warp(cutoff + 6 hours);
+        assertFalse(prices.settlementPriceValid(0, cutoff, 2000));
+        // Mean over the 30 minutes ending at the cutoff is floor(2000 / 1800) = 1.
+        assertTrue(prices.settlementPriceValid(0, cutoff, 489));
+        assertFalse(prices.settlementPriceValid(0, cutoff, 490));
+        assertTrue(prices.settlementPriceValid(0, cutoff, -487));
+        assertFalse(prices.settlementPriceValid(0, cutoff, -488));
+        assertFalse(prices.settlementPriceValid(0, cutoff + 6 hours + 1, 0));
+        assertFalse(prices.settlementPriceValid(10, cutoff, 0));
+        assertFalse(prices.settlementPriceValid(1, cutoff, 0));
+        prices.update(0, 2000);
+        assertFalse(prices.settlementPriceValid(0, cutoff, 0));
     }
 
     function testOracleNegativeMeanRoundsDown() public {

@@ -37,7 +37,6 @@ contract MugiIMDPriceOracle {
         mapping(uint8 => Series) pools;
     }
 
-
     address public immutable hook;
     State private self;
     error InvalidHook();
@@ -92,13 +91,39 @@ contract MugiIMDPriceOracle {
         Series storage series = self.pools[crew];
         uint64 nowTime = _timestamp();
         if (series.count == 0 || nowTime < MIN_HISTORY) revert InsufficientHistory();
-        int128 cumulative = _cumulativeAt(series, nowTime);
-        uint64 cutoff = nowTime - MIN_HISTORY;
+        bool found;
+        (found, averageTick, secondsUsed) = _meanBefore(series, nowTime);
+        if (!found) revert InsufficientHistory();
+    }
+
+    /// @notice Settlement reinforcement guard. Official-pool swaps stop at the round cutoff,
+    /// so the price a settlement deposit meets is the one the last pre-cutoff trade left.
+    /// It is accepted only within MAX_SPOT_DEVIATION_TICKS of the TWAP ending at that cutoff.
+    /// @dev Never reverts for missing or post-cutoff history; the hook defers instead.
+    function settlementPriceValid(uint8 crew, uint64 cutoff, int24 currentTick) external view returns (bool) {
+        if (crew >= 10 || currentTick < TickMath.MIN_TICK || currentTick > TickMath.MAX_TICK) return false;
+        Series storage series = self.pools[crew];
+        if (series.count == 0 || cutoff < MIN_HISTORY || cutoff > _timestamp() || series.lastUpdate > cutoff) {
+            return false;
+        }
+        (bool found, int24 averageTick,) = _meanBefore(series, cutoff);
+        int256 deviation = int256(currentTick) - int256(averageTick);
+        return found && deviation <= MAX_SPOT_DEVIATION_TICKS && deviation >= -int256(MAX_SPOT_DEVIATION_TICKS);
+    }
+
+    /// @dev Mean tick from the newest observation at least MIN_HISTORY before `end` up to `end`.
+    function _meanBefore(Series storage series, uint64 end)
+        private
+        view
+        returns (bool found, int24 averageTick, uint32 secondsUsed)
+    {
+        int128 cumulative = _cumulativeAt(series, end);
+        uint64 cutoff = end - MIN_HISTORY;
         for (uint16 offset; offset < series.count; offset++) {
             uint16 index = (series.index + CAPACITY - offset) % CAPACITY;
             Observation storage observation = series.observations[index];
             if (observation.timestamp > cutoff) continue;
-            uint64 age = nowTime - observation.timestamp;
+            uint64 age = end - observation.timestamp;
             if (age > type(uint32).max) revert InvalidTime();
             secondsUsed = uint32(age);
             int256 elapsedTick = int256(cumulative) - int256(observation.cumulativeTick);
@@ -106,9 +131,8 @@ contract MugiIMDPriceOracle {
             // Solidity truncates negative division toward zero; ticks require mathematical floor.
             if (elapsedTick < 0 && elapsedTick % int256(uint256(age)) != 0) mean--;
             averageTick = int24(mean); // A time-weighted mean stays within validated TickMath bounds.
-            return (averageTick, secondsUsed);
+            return (true, averageTick, secondsUsed);
         }
-        revert InsufficientHistory();
     }
 
     /// @notice Identical read ABI to the hook; aggregation avoids redundant CALLs.

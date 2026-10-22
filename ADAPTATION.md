@@ -8,7 +8,8 @@ Platform admission is pending. This document does not claim a public deployment.
 
 ## Preserved game rules
 
-Ten crews, the 95/5 initial LP/airdrop allocation, fixed daily cutoffs, one VRF
+Ten crews, the 95/5 initial LP/airdrop allocation, daily cutoffs (each fixed
+when it is set; see "Cutoff schedule" below), one VRF
 outcome per round, nine eliminations, 75% loser conversion across survivors,
 pro-rata treasure rewards, LP redistribution, bounded buybacks, team fees,
 permissionless timeout recovery and the 30-day final claim window remain.
@@ -121,6 +122,76 @@ protocol-owned liquidity, not holder restrictions.
 | `README.md`, this file, `inventory.json` | Review record and refreshed file hashes | Packaging. |
 
 No file under `src/`, `foundry.toml`, `remappings`, `lib/` or `launch.json` changed.
+
+## Revision of 2026-10-22: independent review findings
+
+**Source changed in this revision; review it before deployment.** One reviewer
+finding (medium) reproduced as reported and needs a Solidity fix, and one
+advisory finding (low) about the stated reserve-retirement guarantee was fixed
+with it. Nothing has been deployed. The changed source has to be admitted before
+the four factories are created. Compiler settings, the four manifest constructors,
+authorities, `launch.json` and the 4-factory/19-descendant graph are unchanged.
+The main factory still pins the raw hook creation code with
+`type(MugiIMDGameHook).creationCode`, so the pin follows the new source. It is now
+keccak `0x1cd53e485f1619d07454ecbfb17c53e45b8549b5bb500f4a4c66567cc38c626c`,
+24,923 bytes (previously `0x951762db…866357f`, recorded in
+`docs/validation/compatible`, which stays historical evidence for `9901dc7`).
+Hook runtime is 23,121 B (limit 24,576), and the main factory initcode is 46,262 B
+(limit 49,152). The oracle child, and so the accounting factory bytecode, also
+changes.
+
+### Changes in this revision
+
+| File | Change | Finding / rule |
+| --- | --- | --- |
+| `src/imd/modules/MugiIMDPriceOracle.sol` | New view `settlementPriceValid(crew, cutoff, tick)`. It returns true only when the spot tick is within `MAX_SPOT_DEVIATION_TICKS` (488) of the TWAP over at least `MIN_HISTORY` (15 min) **ending at the round cutoff**. It never reverts: it returns false for missing history, a future cutoff, or a series already updated after the cutoff. The existing `consult` loop moved into a private `_meanBefore(series, end)` that `consult` calls with `end = now`. Its behaviour is unchanged. | Medium `e1d28ad3…`: settlement matched liquidity was priced at the unprotected pre-cutoff spot. |
+| `src/imd/MugiIMDGameHook.sol` `_addMatchedLiquidity` | Before depositing a survivor's matched share, the hook reads the pool tick and calls `prices.settlementPriceValid(crew, nextCutoff, tick)`. If it is false, the share goes through the existing `LiquidityDeferred` path, as for an unrepresentable amount. | Same medium finding. The TWAP has to end at the cutoff, not at settlement time: swaps are frozen from the cutoff, so a TWAP ending later would converge on the pumped spot. |
+| `src/imd/MugiIMDGameHook.sol` `abortPrelaunch` | After removing seeded liquidity, sets every `unreleasedReserve[i]` to 0, burns every crew token the hook holds (unused reserve plus returned LP tokens) and emits `ReserveRetired`. | Low `e06ae32b…`: an aborted season kept the full reserve in `totalSupply`, contrary to "unused reserve is burned when its crew or season closes". |
+| `test/imd/lifecycle/MugiSettlementPricing.t.sol` (new) | The reviewer's exact scenario, now deferred: crew-9 liquidity is unchanged and the 300 ETH round trip loses. Also an unmoved survivor that still reinforces, and an ordinary round where all nine survivors reinforce. | Tests for the medium fix. |
+| `test/imd/modules/MugiIMDStateModules.t.sol` | `testSettlementPriceGuardUsesTwapEndingAtCutoff`: one-second pump weight, ±488 boundary, no history, future cutoff, invalid crew, post-cutoff update. | Unit test for the oracle guard. |
+| `README.md`, `docs/IMD_CONSTRUCTOR_DEPLOYMENT.md`, `hook-constructor.json`, `inventory.json` | Revision record, new hook pin, cutoff wording, pre-transaction checks, and refreshed sha256 for the changed files. The hashes are of the files before the pipeline's `forge fmt`. | Packaging and the advisory findings below. |
+| `test/imd/lifecycle/MugiGameHook.t.sol` | `testOwnerCanAbortOnlyBeforeLaunchAndRecoverSeededEth` now asserts zero hook balance and zero unreleased reserve. Supply is left only in the airdrop's 5% of seeded crew 0. | The old assertion (`hook holds >= 95%` after abort) encoded the behaviour the low finding reported. |
+
+Reproduction (scratch test with the reviewer's parameters): before the fix, the
+attacker's ETH change was +19,057,074,374,016,289,333 wei and the control was
+−13,215,452,388,079,516,209 wei. After the fix, the same attack gives
+−13,128,401,461,288,847,986 wei and crew-9 liquidity stays at
+22,898,085,733,661,968,682,982.
+
+Residual properties of the fix, disclosed:
+- A spot move under 488 ticks (about 5%) in the last seconds is still accepted.
+  The deposit's mispricing is limited to the same band that already protects
+  buybacks. The profitability of a sub-band pump was not measured.
+- Someone who moves a crew's price more than 488 ticks just before a cutoff, and
+  pays the swap cost, can make that crew's matched share defer. Deferred ETH is
+  not lost. It stays in the hook and joins the finale residual, or the emergency
+  `recoveryEth`, exactly as the existing sub-unit deferral does.
+- The airdrop's undistributed 5% after an abort stays in `MugiAirdrop`.
+  `retireRemaining` requires a launch, and changing the airdrop would change the
+  main factory's child code beyond this finding.
+
+### Cutoff schedule
+
+Only the first cutoff (`launch + 1 day`) is known at launch. Each later
+`nextCutoff` is set to `block.timestamp + 1 day` by the final `settleRound` batch.
+Request, VRF and settlement latency therefore push every later cutoff back. Once a
+cutoff is set it is fixed, and snapshots, the randomness deadline and the 22-hour
+buyback window are measured from it. The schedule is relative to settlement, not a
+wall-clock daily grid. The source is unchanged on this point (advisory
+`824de018…`), and the wording in this file and the deployment doc now says so.
+
+### Advisory findings not changed in source
+
+| Finding | Assessment |
+| --- | --- |
+| Low `a716cb7c…`: Finalized residual has only the owner-only `migrateToV2` exit; a code-less nonzero pin or a lost key locks it | Reproduces by construction. The brief specifies "an owner-only one-shot atomic handoff" with "a zero constructor target allows the owner to choose a future receiver; a nonzero pin is enforced". Adding a permissionless fallback would change that requested design. Disclosed. A nonzero pin must be an already-deployed contract, and the deployment plan has to check it (see `docs/IMD_CONSTRUCTOR_DEPLOYMENT.md`). |
+| Low `1686951f…`: a community treasury that rejects ETH blocks `sweepExpiredFinalClaims` | True for a reverting treasury contract. The shipped tuple binds the owner EOA, which cannot revert. Kept as a deployment-plan requirement: the community and team treasuries must accept plain ETH. The source comment "No treasury call can block LP recovery" refers to `recoverStalledRandomness`, which makes no treasury call. |
+| Low `5b184c0c…`: `deployHook` does not bind ledger/engine/budgets/prices to the companion factories' predicted children | Reproduces. The hook only proves that those modules echo its bindings, not where they came from. It is reachable only by the factory owner, and the tuple is published in `deployModules`. Binding them would change the main factory's interface. Instead the deployment doc now lists the required pre-transaction equality check against `predictModules()`/`predictEngine()`. |
+| Low `c99850f8…`: `deployCrewSet` accepts any `futureHook`, and a wrong value bricks the one-shot factories | Reproduces as an owner input error with no funds at risk. The deployment doc now requires `futureHook == main.plannedHook()` and `initialSupply == main.initialSupply()` to be checked before that transaction. |
+| Info `d18d4bdd…`: zero V2 pin leaves receiver choice to the owner | Requested design, already disclosed above and in `hook-constructor.json`. |
+| Info `fe8de6a6…`: airdrop attestor can sybil the 5% drop and trigger early launch | Accurate trust assumption on an outside signer. Recorded for the service/attestor part of the subsequent deployment plan. |
+| Info `833c9d77…`: `MugiIMDV4Engine.registerPool` is unreachable `onlyHook` code | Accurate. The hook never calls it. Removing it would change the engine child and the engine factory with no behaviour gain, so it is left as is. |
+| Info `45796c4d…`: `MugiIMDVerifier` uses single-step `Ownable` | Accurate. A bad transfer only disables pinned buyback plans, and budgets fall back to equal shares. This is an operational note for the verifier-owner plan. |
 
 ## Official rules checked
 

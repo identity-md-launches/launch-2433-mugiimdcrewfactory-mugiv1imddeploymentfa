@@ -28,10 +28,12 @@ contract GameRandomnessMock {
     uint256 public requests;
     mapping(uint256 => address) public receivers;
     mapping(uint256 => uint64) public fulfilledAt;
+
     function requestRandomness() external returns (uint256 request) {
         request = ++requests;
         receivers[request] = msg.sender;
     }
+
     function fulfill(uint256 request, uint256 word) external {
         if (fulfilledAt[request] == 0) fulfilledAt[request] = uint64(block.timestamp);
         MugiGameHook(payable(receivers[request])).receiveRandomness(request, word);
@@ -75,7 +77,9 @@ abstract contract MugiGameTestBase is Test {
         manager = manager_;
         vm.deal(address(this), 100_000 ether);
         game = _deployGame(manager);
-        for (uint8 i; i < 10; ++i) crew[i] = game.tokens(i);
+        for (uint8 i; i < 10; ++i) {
+            crew[i] = game.tokens(i);
+        }
         airdrop = game.airdrop();
         // `block.timestamp` can be common-subexpression optimized within this
         // setup transaction. Move past the permissionless seven-day launch
@@ -86,7 +90,9 @@ abstract contract MugiGameTestBase is Test {
         _register(CAROL, 2);
         _register(EARLY, 0);
         _register(LATE, 0);
-        for (uint8 i; i < 10; ++i) game.seedPool{value: POOL_ETH}(i);
+        for (uint8 i; i < 10; ++i) {
+            game.seedPool{value: POOL_ETH}(i);
+        }
         game.launch();
         _claimAirdrop(ALICE);
         _claimAirdrop(BOB);
@@ -101,7 +107,8 @@ abstract contract MugiGameTestBase is Test {
     }
 
     function _deployGameAt(address hookAddress, uint256 supply, IPoolManager manager_)
-        internal returns (MugiGameHook deployed, address[10] memory assets, MugiAirdrop drop)
+        internal
+        returns (MugiGameHook deployed, address[10] memory assets, MugiAirdrop drop)
     {
         MugiCrewFactory crews = new MugiCrewFactory(address(this));
         assets = crews.deployCrewSet(hookAddress, supply);
@@ -115,17 +122,28 @@ abstract contract MugiGameTestBase is Test {
         MugiBuybacks budgets = new MugiBuybacks(hookAddress);
         MugiPriceOracle prices = new MugiPriceOracle(hookAddress);
         MugiGameHook.Configuration memory c = MugiGameHook.Configuration({
-            owner: address(this), manager: address(manager_), team: TEAM, community: COMMUNITY,
-            v2MigrationTarget: _migrationTarget(), initialSupply: supply, ledger: address(ledger),
-            engine: address(engine), budgets: address(budgets), prices: address(prices),
-            randomnessProvider: _makeRandomness(hookAddress), imdVerifier: _makeVerifier(hookAddress),
-            airdrop: address(drop), crewFactory: address(crews)
+            owner: address(this),
+            manager: address(manager_),
+            team: TEAM,
+            community: COMMUNITY,
+            v2MigrationTarget: _migrationTarget(),
+            initialSupply: supply,
+            ledger: address(ledger),
+            engine: address(engine),
+            budgets: address(budgets),
+            prices: address(prices),
+            randomnessProvider: _makeRandomness(hookAddress),
+            imdVerifier: _makeVerifier(hookAddress),
+            airdrop: address(drop),
+            crewFactory: address(crews)
         });
         deployCodeTo("MugiIMDGameHook.sol:MugiIMDGameHook", abi.encode(c), hookAddress);
         deployed = MugiGameHook(payable(hookAddress));
     }
 
-    function _migrationTarget() internal view virtual returns (address) { return address(this); }
+    function _migrationTarget() internal view virtual returns (address) {
+        return address(this);
+    }
 
     function _makeRandomness(address) internal virtual returns (address) {
         randomness = new GameRandomnessMock();
@@ -139,10 +157,13 @@ abstract contract MugiGameTestBase is Test {
     function _register(address account, uint8 id) private {
         bytes32 social = keccak256(abi.encode(account));
         uint64 deadline = uint64(block.timestamp + 2 days);
-        bytes32 digest = keccak256(abi.encodePacked(
-            "\x19\x01", airdrop.DOMAIN_SEPARATOR(),
-            keccak256(abi.encode(airdrop.REGISTRATION_TYPEHASH(), account, id, social, deadline))
-        ));
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                airdrop.DOMAIN_SEPARATOR(),
+                keccak256(abi.encode(airdrop.REGISTRATION_TYPEHASH(), account, id, social, deadline))
+            )
+        );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ATTESTOR_KEY, digest);
         vm.prank(account);
         airdrop.register(id, social, deadline, abi.encodePacked(r, s, v));
@@ -151,10 +172,15 @@ abstract contract MugiGameTestBase is Test {
     function _claimAirdrop(address account) private {
         uint8 id = airdrop.crewPlusOne(account) - 1;
         uint64 deadline = uint64(block.timestamp + 2 days);
-        bytes32 digest = keccak256(abi.encodePacked(
-            "\x19\x01", airdrop.DOMAIN_SEPARATOR(),
-            keccak256(abi.encode(airdrop.CLAIM_TYPEHASH(), account, id, airdrop.socialIdByAccount(account), deadline))
-        ));
+        bytes32 digest = keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                airdrop.DOMAIN_SEPARATOR(),
+                keccak256(
+                    abi.encode(airdrop.CLAIM_TYPEHASH(), account, id, airdrop.socialIdByAccount(account), deadline)
+                )
+            )
+        );
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(ATTESTOR_KEY, digest);
         vm.prank(account);
         airdrop.claim(deadline, abi.encodePacked(r, s, v));
@@ -167,7 +193,8 @@ abstract contract MugiGameTestBase is Test {
         delta = router.swap{value: buy ? 10 ether : 0}(
             game.poolKey(id),
             IPoolManager.SwapParams(buy, specified, buy ? TickMath.MIN_SQRT_PRICE + 1 : TickMath.MAX_SQRT_PRICE - 1),
-            PoolSwapTest.TestSettings(false, false), bytes("")
+            PoolSwapTest.TestSettings(false, false),
+            bytes("")
         );
         vm.stopPrank();
     }
@@ -188,8 +215,10 @@ abstract contract MugiGameTestBase is Test {
     function _assertSolvent() internal view {
         assertGe(address(game).balance + game.unredeemedGameFees(), game.reservedPlayerEth() + game.teamEth());
         for (uint8 i; i < 10; ++i) {
-            assertGe(MugiCrewToken(crew[i]).balanceOf(address(game)),
-                game.escrowBacking(i) + game.unreleasedReserve(i) + game.teamTokens(i));
+            assertGe(
+                MugiCrewToken(crew[i]).balanceOf(address(game)),
+                game.escrowBacking(i) + game.unreleasedReserve(i) + game.teamTokens(i)
+            );
         }
     }
 
@@ -251,9 +280,12 @@ contract MugiGameHookTest is MugiGameTestBase {
         MugiCrewToken(crew[0]).transfer(BOB, 1);
         PoolKey memory key = game.poolKey(0);
         vm.expectRevert();
-        router.swap{value: 0.01 ether}(key,
+        router.swap{value: 0.01 ether}(
+            key,
             IPoolManager.SwapParams(true, -int256(0.01 ether), TickMath.MIN_SQRT_PRICE + 1),
-            PoolSwapTest.TestSettings(false, false), bytes(""));
+            PoolSwapTest.TestSettings(false, false),
+            bytes("")
+        );
         vm.prank(ALICE);
         vm.expectRevert(MugiGameHook.InvalidState.selector);
         game.claimTokens();
@@ -292,7 +324,9 @@ contract MugiGameHookTest is MugiGameTestBase {
         uint256 pot = game.treasure(0);
         uint256 bobBefore = BOB.balance;
         uint128[10] memory priorLiquidity;
-        for (uint8 i; i < 10; ++i) priorLiquidity[i] = game.positionLiquidity(i);
+        for (uint8 i; i < 10; ++i) {
+            priorLiquidity[i] = game.positionLiquidity(i);
+        }
         _requestAndFulfill(0);
         game.settleRound(1);
         assertEq(uint8(game.phase()), uint8(MugiGameHook.Phase.Settling));
@@ -308,7 +342,9 @@ contract MugiGameHookTest is MugiGameTestBase {
         assertEq(BOB.balance, bobBefore + bobEth);
         _assertSolvent();
         game.settleRound(10);
-        for (uint8 i = 1; i < 10; ++i) assertGt(game.positionLiquidity(i), priorLiquidity[i]);
+        for (uint8 i = 1; i < 10; ++i) {
+            assertGt(game.positionLiquidity(i), priorLiquidity[i]);
+        }
         vm.prank(BOB);
         assertEq(game.claimEth(payable(BOB)), 0);
         assertEq(BOB.balance, bobBefore + bobEth);
@@ -365,7 +401,9 @@ contract MugiGameHookTest is MugiGameTestBase {
             game.claimEth(payable(EARLY));
             vm.stopPrank();
             assertEq(game.eliminations(), round + 1);
-            for (uint8 dead; dead <= round; ++dead) assertEq(game.positionLiquidity(dead), 0);
+            for (uint8 dead; dead <= round; ++dead) {
+                assertEq(game.positionLiquidity(dead), 0);
+            }
             _assertSolvent();
         }
         assertEq(game.aliveMask(), uint16(1 << 9));
@@ -529,14 +567,28 @@ contract MugiGameHookTest is MugiGameTestBase {
         assertEq(uint8(prelaunch.phase()), uint8(MugiGameHook.Phase.Aborted));
         assertGe(address(this).balance, ownerBefore - 1);
         assertEq(prelaunch.positionLiquidity(0), 0);
-        assertGe(MugiCrewToken(prelaunchCrew[0]).balanceOf(address(prelaunch)), SUPPLY * 95 / 100 - 1);
+        // Closing the season retires every unused reserve and the returned LP
+        // tokens. Only the airdrop's undistributed 5% stays outside the hook.
+        for (uint8 i; i < 10; ++i) {
+            MugiCrewToken token = MugiCrewToken(prelaunchCrew[i]);
+            assertEq(prelaunch.unreleasedReserve(i), 0);
+            assertEq(token.balanceOf(address(prelaunch)), 0);
+            if (i == 0) {
+                assertGe(token.totalSupply(), SUPPLY / 20);
+                assertLe(token.totalSupply(), SUPPLY / 20 + 1);
+            } else {
+                assertEq(token.totalSupply(), 0);
+            }
+        }
         vm.expectRevert(MugiGameHook.InvalidState.selector);
         prelaunch.abortPrelaunch();
     }
 
     function testFinalClaimsExpireToCommunityAfterThirtyDays() public {
         _fundTreasure(0);
-        for (uint8 round; round < 9; ++round) _round(0);
+        for (uint8 round; round < 9; ++round) {
+            _round(0);
+        }
         vm.warp(game.nextCutoff());
         game.finalize();
 
